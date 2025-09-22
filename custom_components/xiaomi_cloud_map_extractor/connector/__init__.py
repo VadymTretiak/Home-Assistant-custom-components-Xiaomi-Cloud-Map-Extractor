@@ -27,7 +27,7 @@ from .vacuums.vacuum_roborock import RoborockCloudVacuum
 from .vacuums.vacuum_roidmi import RoidmiCloudVacuum
 from .vacuums.vacuum_unsupported import UnsupportedCloudVacuum
 from .vacuums.vacuum_viomi import ViomiCloudVacuum
-from .xiaomi_cloud.connector import XiaomiCloudConnector, XiaomiCloudDeviceInfo
+from .xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ AVAILABLE_VACUUM_PLATFORMS: dict[VacuumApi, Type[BaseXiaomiCloudVacuum]] = {v.va
 class XiaomiCloudMapExtractorConnector:
     _used_api: VacuumApi
     _config: XiaomiCloudMapExtractorConnectorConfiguration
-    _cloud_connector: XiaomiCloudConnector
+    _cloud_connector: MiotConnector
     _vacuum_connector: BaseXiaomiCloudVacuum | None
     _map_cache: XiaomiCloudMapExtractorData
     _status: XiaomiCloudMapExtractorConnectorStatus
@@ -52,7 +52,7 @@ class XiaomiCloudMapExtractorConnector:
     def __init__(self: Self, session_creator: Callable[[], ClientSession],
                  config: XiaomiCloudMapExtractorConnectorConfiguration) -> None:
         self._config = config
-        self._cloud_connector = XiaomiCloudConnector(session_creator, self._config.username, self._config.password)
+        self._cloud_connector = MiotConnector(session_creator, self._config.username, self._config.password)
         self._vacuum_connector: BaseXiaomiCloudVacuum | None = None
         self._map_cache = XiaomiCloudMapExtractorData()
         self._status: XiaomiCloudMapExtractorConnectorStatus = XiaomiCloudMapExtractorConnectorStatus.UNINITIALIZED
