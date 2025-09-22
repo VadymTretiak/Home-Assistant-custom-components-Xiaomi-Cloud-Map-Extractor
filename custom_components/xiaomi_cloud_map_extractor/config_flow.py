@@ -5,7 +5,8 @@ from typing import Any
 from uuid import uuid4
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import (
     CONF_HOST, CONF_TOKEN, CONF_MAC, CONF_MODEL, CONF_DEVICE_ID, CONF_NAME, CONF_CLIENT_ID
 )
@@ -29,12 +30,14 @@ from .const import (
     CONF_SERVER,
     CONF_TOKEN_DATA
 )
+from .options_flow import XiaomiCloudMapExtractorOptionsFlowHandler
 from .types import XiaomiCloudMapExtractorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
+@config_entries.HANDLERS.register(DOMAIN)
+class XiaomiCloudMapExtractorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Xiaomi Cloud Map Extractor."""
 
     VERSION = 1
@@ -49,7 +52,7 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: XiaomiCloudMapExtractorConfigEntry) -> OptionsFlow:
+    def async_get_options_flow(config_entry: XiaomiCloudMapExtractorConfigEntry) -> XiaomiCloudMapExtractorOptionsFlowHandler:
         return XiaomiCloudMapExtractorOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -142,7 +145,6 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(unique_id)
             self._abort_if_unique_id_configured()
 
-            # We are creating the main config entry here, not in an options flow
             return self.async_create_entry(
                 title=self.cloud_vacuum.name,
                 data={
@@ -172,16 +174,3 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             }),
             last_step=True
         )
-
-
-class XiaomiCloudMapExtractorOptionsFlowHandler(OptionsFlow):
-    """This options flow is now a placeholder as setup is handled in the main flow."""
-
-    def __init__(self, config_entry: XiaomiCloudMapExtractorConfigEntry):
-        self.config_entry = config_entry
-
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Manage the options."""
-        # Currently, there are no options to configure after setup.
-        # This can be expanded in the future.
-        return self.async_create_entry(title="", data={})
