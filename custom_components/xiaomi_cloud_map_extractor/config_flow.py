@@ -10,7 +10,6 @@ from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import (
     CONF_HOST, CONF_TOKEN, CONF_MAC, CONF_MODEL, CONF_DEVICE_ID, CONF_NAME, CONF_CLIENT_ID
 )
-from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.network import get_url
@@ -30,8 +29,6 @@ from .const import (
     CONF_SERVER,
     CONF_TOKEN_DATA
 )
-from .options_flow import XiaomiCloudMapExtractorOptionsFlowHandler
-from .types import XiaomiCloudMapExtractorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,11 +46,6 @@ class XiaomiCloudMapExtractorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
         self.token_data: dict[str, Any] | None = None
         self.cloud_vacuums: list[XiaomiCloudDeviceInfo] = []
         self.cloud_vacuum: XiaomiCloudDeviceInfo | None = None
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: XiaomiCloudMapExtractorConfigEntry) -> XiaomiCloudMapExtractorOptionsFlowHandler:
-        return XiaomiCloudMapExtractorOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the initial step."""

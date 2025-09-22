@@ -17,6 +17,7 @@ DEFAULT_UPDATE_INTERVAL: Final = timedelta(seconds=10)
 
 CONF_USED_MAP_API: Final = "used_map_api"
 CONF_SERVER: Final = "server"
+CONF_TOKEN_DATA: Final = "token_data"
 
 CONF_IMAGE_CONFIG: Final = "image_config"
 CONF_IMAGE_CONFIG_SCALE: Final = "scale"
@@ -28,7 +29,7 @@ CONF_IMAGE_CONFIG_TRIM_BOTTOM: Final = "trim_bottom"
 
 CONF_COLORS: Final = "colors"
 
-CONF_ROOM_COLORS = "room_colors"
+CONF_ROOM_COLORS: Final = "room_colors"
 
 CONF_DRAWABLES: Final = "drawables"
 

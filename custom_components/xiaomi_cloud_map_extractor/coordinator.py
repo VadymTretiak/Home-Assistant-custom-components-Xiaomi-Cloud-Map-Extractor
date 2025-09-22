@@ -7,13 +7,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .connector import XiaomiCloudMapExtractorConnector
 from .connector.model import XiaomiCloudMapExtractorData
-from .connector.utils.exceptions import (
-    XiaomiCloudMapExtractorException,
-    FailedLoginException,
-    TwoFactorAuthRequiredException,
-    InvalidDeviceTokenException,
-    InvalidCredentialsException
-)
+from .connector.utils.exceptions import XiaomiCloudMapExtractorException
+from .connector.xiaomi_cloud.miot_connector import MIoTHttpError, MIoTErrorCode
 from .const import DOMAIN, DEFAULT_UPDATE_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,15 +28,12 @@ class XiaomiCloudMapExtractorDataUpdateCoordinator(DataUpdateCoordinator[XiaomiC
     async def update_data(self: Self) -> XiaomiCloudMapExtractorData:
         try:
             return await self.connector.get_data()
-        except (
-                FailedLoginException,
-                InvalidCredentialsException,
-                InvalidDeviceTokenException,
-                TwoFactorAuthRequiredException
-        ) as err:
-            _LOGGER.error(err)
-            _LOGGER.debug("Triggering reauth flow...")
-            raise ConfigEntryAuthFailed(err) from err
+        except MIoTHttpError as err:
+            if err.code == MIoTErrorCode.CODE_HTTP_INVALID_ACCESS_TOKEN:
+                _LOGGER.error("Access token expired or invalid, triggering reauth")
+                raise ConfigEntryAuthFailed(err) from err
+            _LOGGER.error("HTTP error while updating data: %s", err)
+            raise UpdateFailed(err) from err
         except XiaomiCloudMapExtractorException as err:
-            _LOGGER.error(err)
+            _LOGGER.error("Failed to update data: %s", err)
             raise UpdateFailed(err) from err
