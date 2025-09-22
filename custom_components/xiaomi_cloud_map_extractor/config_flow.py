@@ -24,7 +24,7 @@ from vacuum_map_parser_base.config.size import Sizes
 
 from .connector.utils.exceptions import XiaomiCloudMapExtractorException, TwoFactorAuthRequiredException
 from .connector.vacuums.base.model import VacuumApi
-from .connector.xiaomi_cloud.connector import XiaomiCloudConnector, XiaomiCloudDeviceInfo
+from .connector.xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo
 from .connector.xiaomi_cloud.const import AVAILABLE_SERVERS
 from .const import (
     DOMAIN,
@@ -68,6 +68,7 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
         self.username = None
         self.password = None
         self.server = None
+        self.two_factor_url = None
         self.cloud_vacuums: list[XiaomiCloudDeviceInfo] = []
         self.cloud_vacuum: XiaomiCloudDeviceInfo | None = None
 
@@ -103,60 +104,71 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors = {}
         if user_input is not None:
+            self.username = user_input.get(CONF_USERNAME)
+            self.password = user_input.get(CONF_PASSWORD)
+            self.server = user_input.get(CONF_SERVER)
 
-            username = user_input.get(CONF_USERNAME)
-            password = user_input.get(CONF_PASSWORD)
-            server = user_input.get(CONF_SERVER)
-            session_creator = lambda: async_create_clientsession(self.hass)
-
-            connector = XiaomiCloudConnector(session_creator, username, password, server)
-            two_factor_url = None
-            try:
-                if await connector.login() is None:
-                    errors["base"] = "cloud_login_error"
-            except TwoFactorAuthRequiredException as e:
-                errors["base"] = "two_factor_auth_required"  # todo 2fa
-                two_factor_url = e.url
-            except XiaomiCloudMapExtractorException:
-                errors["base"] = "cloud_login_error"
-            except Exception as e:
-                _LOGGER.error("Unexpected exception while attempting Miio cloud login")
-                _LOGGER.error(e, exc_info=True)
-                return self.async_abort(reason="unknown")
-
-            if errors:
-                return self.async_show_form(
-                    step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors,
-                    description_placeholders={"two_factor_url": two_factor_url}
-                )
-
-            try:
-                devices_raw = await connector.get_devices(server)
-            except Exception as e:
-                _LOGGER.error("Unexpected exception while attempting to Miio cloud get devices")
-                _LOGGER.error(e, exc_info=True)
-                return self.async_abort(reason="unknown")
-
-            if not devices_raw:
-                errors[CONF_SERVER] = "cloud_no_devices"
-                return self.async_show_form(
-                    step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
-                )
-
-            self.username = username
-            self.password = password
-            self.server = server
-            self.cloud_vacuums = [device for device in devices_raw if "vacuum" in device.spec_type]
-
-            if len(self.cloud_vacuums) == 1:
-                self.cloud_vacuum = self.cloud_vacuums[0]
-                return await self.async_step_confirm_data()
-
-            return await self.async_step_select_vacuum()
+            return await self._attempt_login(errors)
 
         return self.async_show_form(
             step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
         )
+
+    async def async_step_2fa(
+            self: Self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return await self._attempt_login()
+
+        return self.async_show_form(
+            step_id="2fa",
+            description_placeholders={"two_factor_url": self.two_factor_url},
+            errors={}
+        )
+
+    async def _attempt_login(self, errors: dict[str, str] | None = None):
+        if errors is None:
+            errors = {}
+        session_creator = lambda: async_create_clientsession(self.hass)
+        connector = MiotConnector(session_creator, self.username, self.password, self.server)
+        try:
+            if await connector.login() is None:
+                errors["base"] = "cloud_login_error"
+        except TwoFactorAuthRequiredException as e:
+            self.two_factor_url = e.url
+            return await self.async_step_2fa()
+        except XiaomiCloudMapExtractorException:
+            errors["base"] = "cloud_login_error"
+        except Exception as e:
+            _LOGGER.error("Unexpected exception while attempting Miio cloud login")
+            _LOGGER.error(e, exc_info=True)
+            return self.async_abort(reason="unknown")
+
+        if errors:
+            return self.async_show_form(
+                step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
+            )
+
+        try:
+            devices_raw = await connector.get_devices(self.server)
+        except Exception as e:
+            _LOGGER.error("Unexpected exception while attempting to Miio cloud get devices")
+            _LOGGER.error(e, exc_info=True)
+            return self.async_abort(reason="unknown")
+
+        if not devices_raw:
+            errors[CONF_SERVER] = "cloud_no_devices"
+            return self.async_show_form(
+                step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
+            )
+
+        self.cloud_vacuums = [device for device in devices_raw if "vacuum" in device.spec_type]
+
+        if len(self.cloud_vacuums) == 1:
+            self.cloud_vacuum = self.cloud_vacuums[0]
+            return await self.async_step_confirm_data()
+
+        return await self.async_step_select_vacuum()
 
     async def async_step_select_vacuum(
             self, user_input: dict[str, Any] | None = None

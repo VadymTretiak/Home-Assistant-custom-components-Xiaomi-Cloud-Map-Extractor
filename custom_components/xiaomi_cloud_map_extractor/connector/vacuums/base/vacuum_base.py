@@ -12,14 +12,14 @@ from vacuum_map_parser_base.map_data_parser import MapDataParser
 
 from .model import VacuumConfig, VacuumApi
 from ...utils.exceptions import FailedMapDownloadException, FailedMapParseException
-from ...xiaomi_cloud.connector import XiaomiCloudConnector
+from ...xiaomi_cloud.miot_connector import MiotConnector
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class BaseXiaomiCloudVacuum(ABC):
     model: str
-    _connector: XiaomiCloudConnector
+    _connector: MiotConnector
     _server: str
     _user_id: int
     _device_id: str

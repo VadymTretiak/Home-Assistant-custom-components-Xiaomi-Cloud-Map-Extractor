@@ -14,13 +14,13 @@ from vacuum_map_parser_base.config.text import Text
 
 from custom_components.xiaomi_cloud_map_extractor.camera import PLATFORM_SCHEMA, VacuumCamera
 from custom_components.xiaomi_cloud_map_extractor.const import *
-from custom_components.xiaomi_cloud_map_extractor.vacuum_platforms.vacuum_base import VacuumConfig
-from custom_components.xiaomi_cloud_map_extractor.vacuum_platforms.vacuum_dreame import DreameCloudVacuum
-from custom_components.xiaomi_cloud_map_extractor.vacuum_platforms.vacuum_roidmi import RoidmiCloudVacuum
-from custom_components.xiaomi_cloud_map_extractor.vacuum_platforms.vacuum_unsupported import UnsupportedCloudVacuum
-from custom_components.xiaomi_cloud_map_extractor.vacuum_platforms.vacuum_viomi import ViomiCloudVacuum
-from custom_components.xiaomi_cloud_map_extractor.vacuum_platforms.vacuum_roborock import RoborockCloudVacuum
-from custom_components.xiaomi_cloud_map_extractor.vacuum_platforms.xiaomi_cloud_connector import XiaomiCloudConnector
+from custom_components.xiaomi_cloud_map_extractor.connector.vacuums.base.model import VacuumConfig
+from custom_components.xiaomi_cloud_map_extractor.connector.vacuums.vacuum_dreame import DreameCloudVacuum
+from custom_components.xiaomi_cloud_map_extractor.connector.vacuums.vacuum_roidmi import RoidmiCloudVacuum
+from custom_components.xiaomi_cloud_map_extractor.connector.vacuums.vacuum_unsupported import UnsupportedCloudVacuum
+from custom_components.xiaomi_cloud_map_extractor.connector.vacuums.vacuum_viomi import ViomiCloudVacuum
+from custom_components.xiaomi_cloud_map_extractor.connector.vacuums.vacuum_roborock import RoborockCloudVacuum
+from custom_components.xiaomi_cloud_map_extractor.connector.xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo
 
 logging.basicConfig()
 logging.getLogger().setLevel(logging.WARNING)
@@ -90,9 +90,10 @@ def parse_map_file(map_config, map_filename, api, suffix=""):
 
     image_config = ImageConfig(**{**transform, "trim": TrimConfig(**transform["trim"])})
 
+    dummy_device_info = XiaomiCloudDeviceInfo(device_id="", name="", model="", token="", spec_type="", local_ip=None, mac=None, server="", home_id=0, user_id=0)
     vacuum_config = VacuumConfig(
-        XiaomiCloudConnector("", ""),
-        "",
+        MiotConnector(lambda: None, "", ""),
+        dummy_device_info,
         "",
         "",
         "",

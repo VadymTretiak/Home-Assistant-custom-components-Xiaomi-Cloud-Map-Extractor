@@ -9,12 +9,12 @@ from vacuum_map_parser_base.config.image_config import ImageConfig
 from vacuum_map_parser_base.config.size import Sizes
 from vacuum_map_parser_base.config.text import Text
 
-from ...xiaomi_cloud.connector import XiaomiCloudConnector, XiaomiCloudDeviceInfo
+from ...xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo
 
 
 @dataclass
 class VacuumConfig:
-    connector: XiaomiCloudConnector
+    connector: MiotConnector
     device_info: XiaomiCloudDeviceInfo
     server: str
     device_id: str
