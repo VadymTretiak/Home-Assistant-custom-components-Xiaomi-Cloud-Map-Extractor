@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Self, Mapping
+from typing import Any
 from uuid import uuid4
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import (
     CONF_HOST, CONF_TOKEN, CONF_MAC, CONF_MODEL, CONF_DEVICE_ID, CONF_NAME, CONF_CLIENT_ID
 )
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.config_entry_oauth2_flow import AbstractOAuth2FlowHandler
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.selector import (
@@ -20,66 +19,44 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     SelectSelectorMode,
 )
-from miio import RoborockVacuum
-from vacuum_map_parser_base.config.color import ColorsPalette
-from vacuum_map_parser_base.config.drawable import Drawable
-from vacuum_map_parser_base.config.image_config import ImageConfig
-from vacuum_map_parser_base.config.size import Sizes
 
 from .connector.vacuums.base.model import VacuumApi
-from .connector.xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo, MIoTOauthClient, MIHOME_APP_ID
 from .connector.xiaomi_cloud.const import AVAILABLE_SERVERS
+from .connector.xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo, MIoTOauthClient, MIHOME_APP_ID
 from .const import (
     DOMAIN,
     CONF_USED_MAP_API,
     CONF_SERVER,
-    CONF_COLORS,
-    CONF_IMAGE_CONFIG,
-    CONF_ROOM_COLORS,
-    CONF_DRAWABLES,
-    CONF_SIZES,
-    CONF_TEXTS,
-    CONF_IMAGE_CONFIG_SCALE,
-    CONF_IMAGE_CONFIG_ROTATE,
-    CONF_IMAGE_CONFIG_TRIM_LEFT,
-    CONF_IMAGE_CONFIG_TRIM_BOTTOM,
-    CONF_IMAGE_CONFIG_TRIM_TOP,
-    CONF_IMAGE_CONFIG_TRIM_RIGHT,
     CONF_TOKEN_DATA
 )
-from .options_flow import XiaomiCloudMapExtractorOptionsFlowHandler
 from .types import XiaomiCloudMapExtractorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class XiaomiOAuth2FlowHandler(AbstractOAuth2FlowHandler, domain=DOMAIN):
-    """OAuth2 flow handler for Xiaomi Cloud."""
+class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for Xiaomi Cloud Map Extractor."""
 
-    DOMAIN = DOMAIN
     VERSION = 1
 
     def __init__(self) -> None:
-        super().__init__()
+        """Initialize the config flow."""
         self.server: str | None = None
+        self.oauth_client: MIoTOauthClient | None = None
+        self.token_data: dict[str, Any] | None = None
         self.cloud_vacuums: list[XiaomiCloudDeviceInfo] = []
         self.cloud_vacuum: XiaomiCloudDeviceInfo | None = None
 
-    @property
-    def logger(self) -> logging.Logger:
-        return _LOGGER
-
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: XiaomiCloudMapExtractorConfigEntry) -> XiaomiCloudMapExtractorOptionsFlowHandler:
-        return XiaomiCloudMapExtractorOptionsFlowHandler()
+    def async_get_options_flow(config_entry: XiaomiCloudMapExtractorConfigEntry) -> OptionsFlow:
+        return XiaomiCloudMapExtractorOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Handle a flow initialized by the user to select the server."""
+        """Handle the initial step."""
         if user_input is not None:
             self.server = user_input[CONF_SERVER]
-            # After server is selected, we proceed to the actual OAuth2 auth step
-            return await super().async_step_auth()
+            return await self.async_step_auth()
 
         return self.async_show_form(
             step_id="user",
@@ -88,72 +65,62 @@ class XiaomiOAuth2FlowHandler(AbstractOAuth2FlowHandler, domain=DOMAIN):
             })
         )
 
-    @property
-    def authorization_url(self) -> str:
-        """Return the authorization server url."""
-        if not self.server:
-            # This should not happen in a normal flow
-            raise ValueError("Xiaomi server not set")
-
+    async def async_step_auth(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Redirect user to Xiaomi to authorize."""
         redirect_uri = f"{get_url(self.hass, require_current_request=True)}/auth/external/callback"
-        oauth_client = MIoTOauthClient(
+        self.oauth_client = MIoTOauthClient(
             client_id=MIHOME_APP_ID,
             redirect_url=redirect_uri,
             cloud_server=self.server,
             uuid=str(uuid4())
         )
-        return oauth_client.gen_auth_url()
+        auth_url = self.oauth_client.gen_auth_url()
 
-    async def async_generate_token(self, code: str) -> dict:
-        """Generate a token from an authorization code."""
-        redirect_uri = f"{get_url(self.hass, require_current_request=True)}/auth/external/callback"
-        oauth_client = MIoTOauthClient(
-            client_id=MIHOME_APP_ID,
-            redirect_url=redirect_uri,
-            cloud_server=self.server,
-            uuid=str(uuid4())
-        )
-        token_data = await oauth_client.get_access_token_async(code)
-        return token_data
+        return self.async_external_step(step_id="auth_callback", url=auth_url)
 
-    async def async_oauth_create_entry(self, data: dict) -> ConfigFlowResult:
-        """Handle the successful authentication and proceed to device selection."""
-        # `data` contains the token from `async_generate_token`
-        self.context["token_data"] = data
-        self.context["server"] = self.server
-        access_token = data["access_token"]
+    async def async_step_auth_callback(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Handle the callback from Xiaomi."""
+        if not user_input or "code" not in user_input:
+            return self.async_abort(reason="auth_error_no_code")
 
+        if not self.oauth_client:
+            return self.async_abort(reason="auth_error_no_client")
+
+        try:
+            self.token_data = await self.oauth_client.get_access_token_async(user_input["code"])
+        except Exception as e:
+            _LOGGER.error("Failed to get access token: %s", e, exc_info=True)
+            return self.async_abort(reason="auth_error_token")
+
+        return await self.async_step_device_selection()
+
+    async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Fetch devices and allow user to select one."""
         session = async_get_clientsession(self.hass)
-        connector = MiotConnector(session, self.server, MIHOME_APP_ID, access_token)
+        connector = MiotConnector(session, self.server, MIHOME_APP_ID, self.token_data["access_token"])
 
         try:
             await connector.connect()
             devices_raw = await connector.get_devices()
             self.cloud_vacuums = [device for device in devices_raw if "vacuum" in device.spec_type]
-            self.context["cloud_vacuums"] = self.cloud_vacuums
 
             if not self.cloud_vacuums:
                 return self.async_abort(reason="no_devices")
 
             if len(self.cloud_vacuums) == 1:
                 self.cloud_vacuum = self.cloud_vacuums[0]
-                self.context["cloud_vacuum"] = self.cloud_vacuum
                 return await self.async_step_confirm_data()
 
             return await self.async_step_select_vacuum()
 
         except Exception as e:
-            self.logger.error("Failed to setup Xiaomi Cloud: %s", e, exc_info=True)
-            return self.async_abort(reason="auth_error")
+            _LOGGER.error("Failed to connect to Xiaomi Cloud or get devices: %s", e, exc_info=True)
+            return self.async_abort(reason="auth_error_device_fetch")
 
-    async def async_step_select_vacuum(
-            self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_select_vacuum(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle multiple cloud devices found."""
-        self.cloud_vacuums = self.context["cloud_vacuums"]
         if user_input is not None:
             self.cloud_vacuum = next(filter(lambda v: v.device_id == user_input["select_vacuum"], self.cloud_vacuums))
-            self.context["cloud_vacuum"] = self.cloud_vacuum
             return await self.async_step_confirm_data()
 
         options = [
@@ -168,67 +135,53 @@ class XiaomiOAuth2FlowHandler(AbstractOAuth2FlowHandler, domain=DOMAIN):
             })
         )
 
-    async def async_step_confirm_data(
-            self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Confirm device details and create the entry."""
-        self.cloud_vacuum = self.context["cloud_vacuum"]
-        self.server = self.context["server"]
-        token_data = self.context["token_data"]
-
+    async def async_step_confirm_data(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Final step to confirm local device details and create the entry."""
         if user_input is not None:
-            host = user_input.get(CONF_HOST)
-            token = user_input.get(CONF_TOKEN)
-            used_map_api = user_input.get(CONF_USED_MAP_API)
-
             unique_id = format_mac(self.cloud_vacuum.mac)
             await self.async_set_unique_id(unique_id)
             self._abort_if_unique_id_configured()
 
+            # We are creating the main config entry here, not in an options flow
             return self.async_create_entry(
                 title=self.cloud_vacuum.name,
                 data={
-                    CONF_HOST: host,
-                    CONF_TOKEN: token,
+                    CONF_HOST: user_input[CONF_HOST],
+                    CONF_TOKEN: user_input[CONF_TOKEN],
                     CONF_DEVICE_ID: self.cloud_vacuum.device_id,
                     CONF_MODEL: self.cloud_vacuum.model,
                     CONF_MAC: unique_id,
                     CONF_NAME: self.cloud_vacuum.name,
                     CONF_SERVER: self.server,
-                    CONF_TOKEN_DATA: token_data,
+                    CONF_TOKEN_DATA: self.token_data,
                     CONF_CLIENT_ID: MIHOME_APP_ID,
-                    CONF_USED_MAP_API: used_map_api,
-                },
-                options=self._default_options()
+                    CONF_USED_MAP_API: user_input[CONF_USED_MAP_API],
+                }
             )
 
         detected_api = VacuumApi.detect(self.cloud_vacuum.model)
         return self.async_show_form(
             step_id="confirm_data",
             data_schema=vol.Schema({
-                vol.Required(CONF_HOST, default=self.cloud_vacuum.local_ip): str,
-                vol.Required(CONF_TOKEN, default=self.cloud_vacuum.token): vol.All(str, vol.Length(min=32, max=32)),
-                vol.Required(CONF_USED_MAP_API, default=detected_api): SelectSelector(
-                    SelectSelectorConfig(options=[SelectOptionDict(value=v.value, label=v.title()) for v in VacuumApi], mode=SelectSelectorMode.LIST)
-                )
+                vol.Required(CONF_HOST, default=self.cloud_vacuum.local_ip or ""):
+                    str,
+                vol.Required(CONF_TOKEN, default=self.cloud_vacuum.token):
+                    vol.All(str, vol.Length(min=32, max=32)),
+                vol.Required(CONF_USED_MAP_API, default=detected_api.value):
+                    SelectSelector(SelectSelectorConfig(options=[SelectOptionDict(value=v.value, label=v.title()) for v in VacuumApi], mode=SelectSelectorMode.LIST))
             }),
             last_step=True
         )
 
-    def _default_options(self) -> dict[str, Any]:
-        image_config = ImageConfig()
-        return {
-            CONF_IMAGE_CONFIG: {
-                CONF_IMAGE_CONFIG_SCALE: image_config.scale,
-                CONF_IMAGE_CONFIG_ROTATE: image_config.rotate,
-                CONF_IMAGE_CONFIG_TRIM_LEFT: image_config.trim.left,
-                CONF_IMAGE_CONFIG_TRIM_RIGHT: image_config.trim.right,
-                CONF_IMAGE_CONFIG_TRIM_TOP: image_config.trim.top,
-                CONF_IMAGE_CONFIG_TRIM_BOTTOM: image_config.trim.bottom,
-            },
-            CONF_COLORS: {k: ([*v] if len(v) == 4 else [*v, 255]) for k, v in ColorsPalette.COLORS.items()},
-            CONF_ROOM_COLORS: {},
-            CONF_DRAWABLES: [e.value for e in Drawable if e != Drawable.ROOM_NAMES and "ignored" not in e],
-            CONF_SIZES: {k.value: v for k, v in Sizes.SIZES.items()},
-            CONF_TEXTS: [],
-        }
+
+class XiaomiCloudMapExtractorOptionsFlowHandler(OptionsFlow):
+    """This options flow is now a placeholder as setup is handled in the main flow."""
+
+    def __init__(self, config_entry: XiaomiCloudMapExtractorConfigEntry):
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Manage the options."""
+        # Currently, there are no options to configure after setup.
+        # This can be expanded in the future.
+        return self.async_create_entry(title="", data={})
