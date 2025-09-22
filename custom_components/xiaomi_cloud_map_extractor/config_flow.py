@@ -7,11 +7,12 @@ from uuid import uuid4
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import (
-    CONF_HOST, CONF_TOKEN, CONF_MAC, CONF_MODEL, CONF_DEVICE_ID, CONF_NAME, CONF_ACCESS_TOKEN, CONF_CLIENT_ID
+    CONF_HOST, CONF_TOKEN, CONF_MAC, CONF_MODEL, CONF_DEVICE_ID, CONF_NAME, CONF_CLIENT_ID
 )
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.network import get_url
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -42,7 +43,8 @@ from .const import (
     CONF_IMAGE_CONFIG_TRIM_LEFT,
     CONF_IMAGE_CONFIG_TRIM_BOTTOM,
     CONF_IMAGE_CONFIG_TRIM_TOP,
-    CONF_IMAGE_CONFIG_TRIM_RIGHT
+    CONF_IMAGE_CONFIG_TRIM_RIGHT,
+    CONF_TOKEN_DATA
 )
 from .options_flow import XiaomiCloudMapExtractorOptionsFlowHandler
 from .types import XiaomiCloudMapExtractorConfigEntry
@@ -55,10 +57,11 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialize."""
-        self.server = None
-        self.access_token = None
+        self.server: str | None = None
+        self.token_data: dict[str, Any] | None = None
         self.cloud_vacuums: list[XiaomiCloudDeviceInfo] = []
         self.cloud_vacuum: XiaomiCloudDeviceInfo | None = None
+        self.oauth_client: MIoTOauthClient | None = None
 
     @staticmethod
     @callback
@@ -81,36 +84,54 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_auth(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Handle authentication."""
-        # Full OAuth2 flow is not implemented for simplicity, we will get the token from the user
-        errors = {}
-        if user_input is not None:
-            self.access_token = user_input[CONF_ACCESS_TOKEN]
-            session = async_create_clientsession(self.hass)
-            connector = MiotConnector(session, self.server, MIHOME_APP_ID, self.access_token)
-            try:
-                await connector.connect()
-                devices_raw = await connector.get_devices()
-                self.cloud_vacuums = [device for device in devices_raw if "vacuum" in device.spec_type]
-
-                if not self.cloud_vacuums:
-                    errors["base"] = "no_devices"
-                else:
-                    if len(self.cloud_vacuums) == 1:
-                        self.cloud_vacuum = self.cloud_vacuums[0]
-                        return await self.async_step_confirm_data()
-                    return await self.async_step_select_vacuum()
-
-            except Exception as e:
-                _LOGGER.error("Failed to connect to Xiaomi Cloud: %s", e, exc_info=True)
-                errors["base"] = "auth_error"
-
-        return self.async_show_form(
-            step_id="auth",
-            data_schema=vol.Schema({vol.Required(CONF_ACCESS_TOKEN): str}),
-            errors=errors,
-            description_placeholders={'auth_url': "https://user.mi.com/do/oauth2/authorize?client_id=2882303761517542183&redirect_uri=https://localhost/&response_type=token"}
+        """Redirect user to Xiaomi to authorize."""
+        redirect_uri = f"{get_url(self.hass, require_current_request=True)}/auth/external/callback"
+        self.oauth_client = MIoTOauthClient(
+            client_id=MIHOME_APP_ID,
+            redirect_url=redirect_uri,
+            cloud_server=self.server,
+            uuid=str(uuid4())
         )
+        auth_url = self.oauth_client.gen_auth_url()
+
+        return self.async_external_step(step_id="auth_callback", url=auth_url)
+
+    async def async_step_auth_callback(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Handle authentication callback from external auth."""
+        if not user_input or "code" not in user_input:
+            return self.async_abort(reason="auth_error")
+
+        code = user_input["code"]
+
+        if not self.oauth_client:
+            return self.async_abort(reason="missing_server")
+
+        try:
+            self.token_data = await self.oauth_client.get_access_token_async(code)
+        except Exception as e:
+            _LOGGER.error("Failed to get access token: %s", e, exc_info=True)
+            return self.async_abort(reason="auth_error")
+
+        session = async_create_clientsession(self.hass)
+        connector = MiotConnector(session, self.server, MIHOME_APP_ID, self.token_data["access_token"])
+
+        try:
+            await connector.connect()
+            devices_raw = await connector.get_devices()
+            self.cloud_vacuums = [device for device in devices_raw if "vacuum" in device.spec_type]
+
+            if not self.cloud_vacuums:
+                return self.async_abort(reason="no_devices")
+
+            if len(self.cloud_vacuums) == 1:
+                self.cloud_vacuum = self.cloud_vacuums[0]
+                return await self.async_step_confirm_data()
+
+            return await self.async_step_select_vacuum()
+
+        except Exception as e:
+            _LOGGER.error("Failed to connect to Xiaomi Cloud or get devices: %s", e, exc_info=True)
+            return self.async_abort(reason="auth_error")
 
     async def async_step_select_vacuum(
             self, user_input: dict[str, Any] | None = None
@@ -167,7 +188,7 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                         CONF_MAC: format_mac(self.cloud_vacuum.mac),
                         CONF_NAME: self.cloud_vacuum.name,
                         CONF_SERVER: self.server,
-                        CONF_ACCESS_TOKEN: self.access_token,
+                        CONF_TOKEN_DATA: self.token_data,
                         CONF_CLIENT_ID: MIHOME_APP_ID,
                         CONF_USED_MAP_API: used_map_api,
                     },
