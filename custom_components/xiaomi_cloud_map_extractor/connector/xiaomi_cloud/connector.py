@@ -121,14 +121,20 @@ class XiaomiCloudConnector:
         except:
             raise FailedLoginException()
 
-        successful = response.status == 200 and "_sign" in response_json
-        if successful:
-            sign = response_json["_sign"]
-            _LOGGER.debug("Xiaomi cloud login - step 1 sign: %s", sign)
-            return sign
+        if response.status == 200:
+            if "ssecurity" in response_json:
+                self._session_data.ssecurity = response_json["ssecurity"]
+                self._session_data.userId = response_json["userId"]
+                if "max-age" in response.cookies.get("userId", {}):
+                    max_age = int(response.cookies.get("userId").get("max-age"))
+                    self._session_data.expiration = datetime.datetime.now() + datetime.timedelta(seconds=max_age)
+                return response_json["location"]
+            if "_sign" in response_json:
+                sign = response_json["_sign"]
+                _LOGGER.debug("Xiaomi cloud login - step 1 sign: %s", sign)
+                return sign
 
-        _LOGGER.debug("Xiaomi cloud login - step 1 sign missing")
-        return ""
+        raise FailedLoginException("Xiaomi cloud login - step 1 failed")
 
     async def _login_step_2(self: Self, sign: str) -> str:
         _LOGGER.debug("Xiaomi cloud login - step 2")
@@ -153,6 +159,9 @@ class XiaomiCloudConnector:
         except:
             raise InvalidCredentialsException()
         if response.status == 200:
+            if "captchaUrl" in response_json and response_json["captchaUrl"] is not None:
+                _LOGGER.error("Captcha required, which is not supported.")
+                raise FailedLoginException("Captcha required")
             if "ssecurity" in response_json:
                 location = response_json["location"]
                 self._session_data.ssecurity = response_json["ssecurity"]
@@ -188,13 +197,65 @@ class XiaomiCloudConnector:
     async def login(self: Self) -> str | None:
         _LOGGER.debug("Logging in...")
         await self.create_session()
-        sign = await self._login_step_1()
-        if not sign.startswith('http'):
-            location = await self._login_step_2(sign)
+        sign_or_location = await self._login_step_1()
+        if not sign_or_location.startswith('http'):
+            location = await self._login_step_2(sign_or_location)
         else:
-            location = sign
+            location = sign_or_location
         await self._login_step_3(location)
         _LOGGER.debug("Logged in.")
+        return self._session_data.serviceToken
+
+    async def finish_login_with_2fa(self, notification_url: str, code: str) -> str | None:
+        _LOGGER.debug("Finishing login with 2FA code")
+
+        path = 'identity/authStart'
+        if path not in notification_url:
+            raise InvalidCredentialsException("Invalid notification_url")
+
+        list_url = notification_url.replace(path, 'identity/list')
+        try:
+            resp = await self._session_data.get(list_url)
+            identity_session_cookie = resp.cookies.get('identity_session')
+            if not identity_session_cookie:
+                raise FailedLoginException("Failed to get identity_session cookie")
+            identity_session = identity_session_cookie.value
+
+            resp_json = to_json(await resp.text()) or {}
+            options = resp_json.get('options', [resp_json.get('flag', 4)])
+
+            verify_json = None
+            for flag in options:
+                api = {4: '/identity/auth/verifyPhone', 8: '/identity/auth/verifyEmail'}.get(flag)
+                if not api:
+                    continue
+                api_url = 'https://account.xiaomi.com' + api
+                params = {'_dc': int(time.time() * 1000)}
+                data = {'_flag': str(flag), 'ticket': code, 'trust': 'true', '_json': 'true'}
+                cookies = {'identity_session': identity_session}
+                verify_resp = await self._session_data.post(api_url, params=params, data=data, cookies=cookies)
+                verify_json_data = to_json(await verify_resp.text())
+                if verify_json_data.get('code') == 0:
+                    verify_json = verify_json_data
+                    break
+
+            if not verify_json:
+                raise InvalidCredentialsException("2FA code verification failed")
+
+        except Exception as e:
+            _LOGGER.error("Error during 2FA verification: %s", e)
+            raise FailedLoginException() from e
+
+        location_from_2fa = verify_json["location"]
+        await self._session_data.get(location_from_2fa)
+
+        sign_or_location = await self._login_step_1()
+        if not sign_or_location.startswith('http'):
+            raise FailedLoginException("Failed to get location after 2FA")
+
+        location = sign_or_location
+        await self._login_step_3(location)
+        _LOGGER.debug("Logged in with 2FA.")
         return self._session_data.serviceToken
 
     def is_authenticated(self: Self) -> bool:
@@ -203,7 +264,7 @@ class XiaomiCloudConnector:
     async def get_raw_map_data(self: Self, map_url: str | None) -> bytes | None:
         if map_url is not None:
             try:
-                _LOGGER.debug("Downloading raw map from \"%s\"...", map_url)
+                _LOGGER.debug("Downloading raw map from \"%s\"", map_url)
                 response = await self._session_data.session.get(map_url)
             except:
                 _LOGGER.debug("Downloading the map failed.")
