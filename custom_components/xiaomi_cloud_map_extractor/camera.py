@@ -223,7 +223,9 @@ class VacuumCamera(Camera):
             attributes[ATTR_MODEL] = self._device.model
             attributes[ATTR_USED_API] = self._used_api
         if self._connector.two_factor_auth_url is not None:
-            attributes[ATTR_TWO_FACTOR_AUTH] = self._connector.two_factor_auth_url
+            attributes[ATTR_AUTH_URL] = self._connector.two_factor_auth_url
+        if self._connector.captcha_url is not None:
+            attributes[ATTR_CAPTCHA_IMAGE_URL] = self._connector.captcha_url
         return attributes
 
     @property
@@ -273,15 +275,13 @@ class VacuumCamera(Camera):
 
     def update(self):
         counter = 10
-        if self._status != CameraStatus.TWO_FACTOR_AUTH_REQUIRED and not self._logged_in:
+        if self._status != CameraStatus.AUTH_REQUIRED and self._status != CameraStatus.CAPTCHA_REQUIRED and not self._logged_in:
             self._handle_login()
         if self._device is None and self._logged_in:
             self._handle_device()
 
         new_map_name = self._handle_map_name(counter)
         if new_map_name != "retry":
-            # sometimes this fails for no reason, so try and mitigate that by
-            # falling back to the previous map name if we have one
             self._map_name = new_map_name
 
         if self._map_name is None and self._device is not None:
@@ -300,13 +300,17 @@ class VacuumCamera(Camera):
         self._logged_in = self._connector.login()
         if self._logged_in is None:
             _LOGGER.debug("2FA required")
-            self._status = CameraStatus.TWO_FACTOR_AUTH_REQUIRED
+            self._status = CameraStatus.AUTH_REQUIRED
         elif self._logged_in:
             _LOGGER.debug("Logged in")
             self._status = CameraStatus.LOGGED_IN
         else:
-            _LOGGER.debug("Failed to log in")
-            self._status = CameraStatus.FAILED_LOGIN
+            if self._connector.captcha_url:
+                _LOGGER.debug("CAPTCHA required")
+                self._status = CameraStatus.CAPTCHA_REQUIRED
+            else:
+                _LOGGER.debug("Failed to log in")
+                self._status = CameraStatus.FAILED_LOGIN
             if self._logged_in_previously:
                 _LOGGER.error("Unable to log in, check credentials")
 
@@ -323,17 +327,6 @@ class VacuumCamera(Camera):
             self._status = CameraStatus.FAILED_TO_RETRIEVE_DEVICE
 
     def _handle_map_name(self, counter: int) -> str:
-        """
-        Downloads the map name from the vacuum. Sometimes the vacuum will just return
-        "retry" as the map for reasons unknown, so we'll try a few times before giving up.
-
-        We use exponential backoff to give the vacuum a chance to do whatever internal
-        processing it needs to do to get us a map name.
-
-        Pure speculation: perhaps the vacuum is busy trying to get a server connection
-        to be able to upload a map? When I run this command multiple times, there's an
-        incrementing number in the map names returned.
-        """
         map_name = "retry"
         if self._device is not None and not self._device.should_get_map_from_vacuum():
             map_name = "0"
@@ -362,7 +355,6 @@ class VacuumCamera(Camera):
         map_data, map_stored = self._device.get_map(map_name, self._colors, self._drawables, self._texts,
                                                     self._sizes, self._image_config, store_map_path)
         if map_data is not None:
-            # noinspection PyBroadException
             try:
                 _LOGGER.debug("Map data retrieved")
                 self._map_saved = map_stored
@@ -434,7 +426,8 @@ class CameraStatus(Enum):
     NOT_LOGGED_IN = 'Not logged in'
     OK = 'OK'
     LOGGED_IN = 'Logged in'
-    TWO_FACTOR_AUTH_REQUIRED = 'Two factor auth required (see logs)'
+    AUTH_REQUIRED = 'Authentication required (see logs)'
+    CAPTCHA_REQUIRED = 'CAPTCHA required (see logs)'
     UNABLE_TO_PARSE_MAP = 'Unable to parse map'
     UNABLE_TO_RETRIEVE_MAP = 'Unable to retrieve map'
 
