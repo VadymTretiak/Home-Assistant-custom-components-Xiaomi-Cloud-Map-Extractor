@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Self, Mapping
+from uuid import uuid4
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.const import (CONF_HOST, CONF_TOKEN, CONF_MAC, CONF_USERNAME, CONF_PASSWORD, CONF_MODEL,
-                                 CONF_DEVICE_ID, CONF_NAME)
+from homeassistant.const import (
+    CONF_HOST, CONF_TOKEN, CONF_MAC, CONF_MODEL, CONF_DEVICE_ID, CONF_NAME, CONF_ACCESS_TOKEN, CONF_CLIENT_ID
+)
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.device_registry import format_mac
@@ -22,9 +24,8 @@ from vacuum_map_parser_base.config.drawable import Drawable
 from vacuum_map_parser_base.config.image_config import ImageConfig
 from vacuum_map_parser_base.config.size import Sizes
 
-from .connector.utils.exceptions import XiaomiCloudMapExtractorException, TwoFactorAuthRequiredException
 from .connector.vacuums.base.model import VacuumApi
-from .connector.xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo
+from .connector.xiaomi_cloud.miot_connector import MiotConnector, XiaomiCloudDeviceInfo, MIoTOauthClient, MIHOME_APP_ID
 from .connector.xiaomi_cloud.const import AVAILABLE_SERVERS
 from .const import (
     DOMAIN,
@@ -48,27 +49,14 @@ from .types import XiaomiCloudMapExtractorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
-CLOUD_SCHEMA = vol.Schema(
-    {
-        vol.Optional(CONF_USERNAME): str,
-        vol.Optional(CONF_PASSWORD): str,
-        vol.Optional(CONF_SERVER, default='de'): vol.In(
-            AVAILABLE_SERVERS
-        )
-    }
-)
 
-
-# noinspection PyTypeChecker,PyBroadException
 class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
         """Initialize."""
-        self.username = None
-        self.password = None
         self.server = None
-        self.two_factor_url = None
+        self.access_token = None
         self.cloud_vacuums: list[XiaomiCloudDeviceInfo] = []
         self.cloud_vacuum: XiaomiCloudDeviceInfo | None = None
 
@@ -79,96 +67,50 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
         """Get the options flow."""
         return XiaomiCloudMapExtractorOptionsFlowHandler()
 
-    async def async_step_reauth(
-            self, entry_data: Mapping[str, Any]
-    ) -> ConfigFlowResult:
-        """Perform reauth upon an authentication error or missing cloud credentials."""
-        return await self.async_step_reauth_confirm()
-
-    async def async_step_reauth_confirm(
-            self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Dialog that informs the user that reauth is required."""
-        if user_input is not None:
-            return await self.async_step_cloud()
-        return self.async_show_form(step_id="reauth_confirm")
-
-    async def async_step_user(
-            self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle a flow initialized by the user."""
-        return await self.async_step_cloud()
+        if user_input is not None:
+            self.server = user_input[CONF_SERVER]
+            return await self.async_step_auth()
 
-    async def async_step_cloud(
-            self: Self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema({
+                vol.Required(CONF_SERVER, default="de"): vol.In(AVAILABLE_SERVERS)
+            })
+        )
+
+    async def async_step_auth(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Handle authentication."""
+        # Full OAuth2 flow is not implemented for simplicity, we will get the token from the user
         errors = {}
         if user_input is not None:
-            self.username = user_input.get(CONF_USERNAME)
-            self.password = user_input.get(CONF_PASSWORD)
-            self.server = user_input.get(CONF_SERVER)
+            self.access_token = user_input[CONF_ACCESS_TOKEN]
+            session = async_create_clientsession(self.hass)
+            connector = MiotConnector(session, self.server, MIHOME_APP_ID, self.access_token)
+            try:
+                await connector.connect()
+                devices_raw = await connector.get_devices()
+                self.cloud_vacuums = [device for device in devices_raw if "vacuum" in device.spec_type]
 
-            return await self._attempt_login(errors)
+                if not self.cloud_vacuums:
+                    errors["base"] = "no_devices"
+                else:
+                    if len(self.cloud_vacuums) == 1:
+                        self.cloud_vacuum = self.cloud_vacuums[0]
+                        return await self.async_step_confirm_data()
+                    return await self.async_step_select_vacuum()
+
+            except Exception as e:
+                _LOGGER.error("Failed to connect to Xiaomi Cloud: %s", e, exc_info=True)
+                errors["base"] = "auth_error"
 
         return self.async_show_form(
-            step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
+            step_id="auth",
+            data_schema=vol.Schema({vol.Required(CONF_ACCESS_TOKEN): str}),
+            errors=errors,
+            description_placeholders={'auth_url': "https://user.mi.com/do/oauth2/authorize?client_id=2882303761517542183&redirect_uri=https://localhost/&response_type=token"}
         )
-
-    async def async_step_2fa(
-            self: Self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        if user_input is not None:
-            return await self._attempt_login()
-
-        return self.async_show_form(
-            step_id="2fa",
-            description_placeholders={"two_factor_url": self.two_factor_url},
-            errors={}
-        )
-
-    async def _attempt_login(self, errors: dict[str, str] | None = None):
-        if errors is None:
-            errors = {}
-        session_creator = lambda: async_create_clientsession(self.hass)
-        connector = MiotConnector(session_creator, self.username, self.password, self.server)
-        try:
-            if await connector.login() is None:
-                errors["base"] = "cloud_login_error"
-        except TwoFactorAuthRequiredException as e:
-            self.two_factor_url = e.url
-            return await self.async_step_2fa()
-        except XiaomiCloudMapExtractorException:
-            errors["base"] = "cloud_login_error"
-        except Exception as e:
-            _LOGGER.error("Unexpected exception while attempting Miio cloud login")
-            _LOGGER.error(e, exc_info=True)
-            return self.async_abort(reason="unknown")
-
-        if errors:
-            return self.async_show_form(
-                step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
-            )
-
-        try:
-            devices_raw = await connector.get_devices(self.server)
-        except Exception as e:
-            _LOGGER.error("Unexpected exception while attempting to Miio cloud get devices")
-            _LOGGER.error(e, exc_info=True)
-            return self.async_abort(reason="unknown")
-
-        if not devices_raw:
-            errors[CONF_SERVER] = "cloud_no_devices"
-            return self.async_show_form(
-                step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
-            )
-
-        self.cloud_vacuums = [device for device in devices_raw if "vacuum" in device.spec_type]
-
-        if len(self.cloud_vacuums) == 1:
-            self.cloud_vacuum = self.cloud_vacuums[0]
-            return await self.async_step_confirm_data()
-
-        return await self.async_step_select_vacuum()
 
     async def async_step_select_vacuum(
             self, user_input: dict[str, Any] | None = None
@@ -212,49 +154,35 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_vacuum"
             else:
                 unique_id = format_mac(self.cloud_vacuum.mac)
-                existing_entry = await self.async_set_unique_id(
-                    unique_id, raise_on_progress=False
+                await self.async_set_unique_id(unique_id, raise_on_progress=False)
+                self._abort_if_unique_id_configured()
+
+                return self.async_create_entry(
+                    title=self.cloud_vacuum.name,
+                    data={
+                        CONF_HOST: host,
+                        CONF_TOKEN: token,
+                        CONF_DEVICE_ID: self.cloud_vacuum.device_id,
+                        CONF_MODEL: self.cloud_vacuum.model,
+                        CONF_MAC: format_mac(self.cloud_vacuum.mac),
+                        CONF_NAME: self.cloud_vacuum.name,
+                        CONF_SERVER: self.server,
+                        CONF_ACCESS_TOKEN: self.access_token,
+                        CONF_CLIENT_ID: MIHOME_APP_ID,
+                        CONF_USED_MAP_API: used_map_api,
+                    },
+                    options={
+                        CONF_IMAGE_CONFIG: self._default_image_config(),
+                        CONF_COLORS: self._default_colors(),
+                        CONF_ROOM_COLORS: {},
+                        CONF_DRAWABLES: [
+                            e.value for e in Drawable if
+                            e != Drawable.ROOM_NAMES and "ignored" not in e
+                        ],
+                        CONF_SIZES: {k.value: v for k, v in Sizes.SIZES.items()},
+                        CONF_TEXTS: [],
+                    }
                 )
-                if existing_entry:
-                    data = existing_entry.data.copy()
-                    data[CONF_HOST] = host
-                    data[CONF_TOKEN] = token
-                    data[CONF_DEVICE_ID] = self.cloud_vacuum.device_id,
-                    data[CONF_MODEL] = self.cloud_vacuum.model
-                    data[CONF_MAC] = format_mac(self.cloud_vacuum.mac)
-                    data[CONF_NAME] = self.cloud_vacuum.name
-                    data[CONF_USERNAME] = self.username
-                    data[CONF_PASSWORD] = self.password
-                    data[CONF_SERVER] = self.server
-                    data[CONF_USED_MAP_API] = used_map_api
-                    return self.async_update_reload_and_abort(existing_entry, data=data)
-                else:
-                    return self.async_create_entry(
-                        title=self.cloud_vacuum.name,
-                        data={
-                            CONF_HOST: host,
-                            CONF_TOKEN: token,
-                            CONF_DEVICE_ID: self.cloud_vacuum.device_id,
-                            CONF_MODEL: self.cloud_vacuum.model,
-                            CONF_MAC: format_mac(self.cloud_vacuum.mac),
-                            CONF_NAME: self.cloud_vacuum.name,
-                            CONF_USERNAME: self.username,
-                            CONF_PASSWORD: self.password,
-                            CONF_SERVER: self.server,
-                            CONF_USED_MAP_API: used_map_api,
-                        },
-                        options={
-                            CONF_IMAGE_CONFIG: self._default_image_config(),
-                            CONF_COLORS: self._default_colors(),
-                            CONF_ROOM_COLORS: {},
-                            CONF_DRAWABLES: [
-                                e.value for e in Drawable if
-                                e != Drawable.ROOM_NAMES and "ignored" not in e
-                            ],
-                            CONF_SIZES: {k.value: v for k, v in Sizes.SIZES.items()},
-                            CONF_TEXTS: [],
-                        }
-                    )
 
         detected_api = VacuumApi.detect(self.cloud_vacuum.model)
         api_options: list[SelectOptionDict] = [
